@@ -1,0 +1,47 @@
+[
+  {
+    "player_id": 1,
+    "name": "LeBron James",
+    "team": "LAL",
+    "position": "F",
+    "avg_first_basket_time": 15.2,
+    "first_basket_probability": 0.08,
+    "games_played": 75
+  },
+  {
+    "player_id": 2,
+    "name": "Stephen Curry",
+    "team": "GSW",
+    "position": "G",
+    "avg_first_basket_time": 12.8,
+    "first_basket_probability": 0.12,
+    "games_played": 72
+  },
+  {
+    "player_id": 3,
+    "name": "Kevin Durant",
+    "team": "BKN",
+    "position": "F",
+    "avg_first_basket_time": 18.5,
+    "first_basket_probability": 0.06,
+    "games_played": 68
+  },
+  {
+    "player_id": 4,
+    "name": "Giannis Antetokounmpo",
+    "team": "MIL",
+    "position": "F",
+    "avg_first_basket_time": 14.3,
+    "first_basket_probability": 0.09,
+    "games_played": 70
+  },
+  {
+    "player_id": 5,
+    "name": "Luka Doncic",
+    "team": "DAL",
+    "position": "G",
+    "avg_first_basket_time": 16.7,
+    "first_basket_probability": 0.07,
+    "games_played": 65
+  }
+]

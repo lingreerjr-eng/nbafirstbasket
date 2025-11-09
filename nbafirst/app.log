@@ -1,0 +1,36 @@
+2025-11-09 15:28:24,146 - INFO - Starting NBA First Basket Predictor
+2025-11-09 15:28:24,147 - INFO - Performing initial data scraping...
+2025-11-09 15:28:24,147 - INFO - Scraping data for seasons: 2023-2024, 2025-2026
+2025-11-09 15:28:24,148 - INFO - Saved data for season 2023-2024
+2025-11-09 15:28:24,149 - INFO - Saved data for season 2025-2026
+2025-11-09 15:28:24,149 - INFO - Season data scraping completed
+2025-11-09 15:28:24,149 - INFO - Training initial model...
+2025-11-09 15:28:24,149 - INFO - Training first basket prediction model
+2025-11-09 15:28:24,149 - INFO - Model training completed
+2025-11-09 15:28:24,149 - INFO - Starting scheduler...
+2025-11-09 15:28:37,235 - INFO - Starting NBA First Basket Predictor
+2025-11-09 15:28:37,236 - INFO - Performing initial data scraping...
+2025-11-09 15:28:37,236 - INFO - Scraping data for seasons: 2023-2024, 2025-2026
+2025-11-09 15:28:37,238 - INFO - Saved data for season 2023-2024
+2025-11-09 15:28:37,241 - INFO - Saved data for season 2025-2026
+2025-11-09 15:28:37,241 - INFO - Season data scraping completed
+2025-11-09 15:28:37,241 - INFO - Training initial model...
+2025-11-09 15:28:37,241 - INFO - Training first basket prediction model
+2025-11-09 15:28:37,242 - INFO - Model training completed
+2025-11-09 15:28:37,242 - INFO - Starting scheduler...
+2025-11-09 15:28:37,243 - INFO - Scheduler started
+2025-11-09 15:28:37,243 - INFO - Starting periodic data scraping
+2025-11-09 15:28:37,243 - INFO - Scraping data for seasons: 2023-2024, 2025-2026
+2025-11-09 15:28:37,245 - INFO - Saved data for season 2023-2024
+2025-11-09 15:28:37,247 - INFO - Saved data for season 2025-2026
+2025-11-09 15:28:37,247 - INFO - Season data scraping completed
+2025-11-09 15:28:37,247 - INFO - Data scraping completed
+2025-11-09 15:28:37,247 - INFO - Checking for upcoming games and making predictions
+2025-11-09 15:28:37,247 - INFO - 
+Game: GSW @ LAL
+2025-11-09 15:28:37,247 - INFO - Predicted first basket: Stephen Curry (GSW)
+2025-11-09 15:28:37,247 - INFO - Probability: 12.00% (Confidence: high)
+2025-11-09 15:28:37,248 - INFO - 
+Game: BKN @ MIL
+2025-11-09 15:28:37,248 - INFO - Predicted first basket: Giannis Antetokounmpo (MIL)
+2025-11-09 15:28:37,248 - INFO - Probability: 9.00% (Confidence: high)
