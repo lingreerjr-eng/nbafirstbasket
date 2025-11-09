@@ -46,3 +46,17 @@ Game: GSW @ LAL
 Predicted first basket: LeBron James (LAL)
 Probability: 8.00% (Confidence: high)
 ```
+
+## Data Sources & Compliance
+
+The scraper only uses publicly documented NBA endpoints (`data.nba.com` and `cdn.nba.com`) after
+checking the league's `robots.txt`. Requests are rate-limited and identify as a
+standard desktop browser to comply with access policies.
+
+## Stored Data
+
+Scraped play-by-play results are persisted to `data/first_baskets.db` and
+exported as season-specific JSON snapshots (`players_<season>.json` and
+`games_<season>.json`). Running the scraper repeatedly will incrementally update
+this database, allowing the application to build a historical record of first
+basket events over time.
