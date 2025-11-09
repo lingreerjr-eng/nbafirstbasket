@@ -4,9 +4,21 @@ import os
 import sqlite3
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
+
+try:
+    from bs4 import BeautifulSoup  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    BeautifulSoup = None  # type: ignore
+
+try:
+    from nba_api.live.nba.endpoints import playbyplay as live_playbyplay  # type: ignore
+    from nba_api.live.nba.endpoints import scoreboard as live_scoreboard  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    live_playbyplay = None  # type: ignore
+    live_scoreboard = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +30,45 @@ class NBAScraper:
     PBP_URL = "https://cdn.nba.com/static/json/liveData/playbyplay/playbyplay_{game_id}.json"
     SCOREBOARD_URL = "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json"
     ROBOTS_URL = "https://www.nba.com/robots.txt"
+    BREF_BOX_SCORES_URL = "https://www.basketball-reference.com/boxscores/"
+    BREF_PBP_URL = "https://www.basketball-reference.com/boxscores/pbp/{game_id}.html"
+
+    TEAM_TO_BREF = {
+        "ATL": "ATL",
+        "BOS": "BOS",
+        "BKN": "BRK",
+        "BRK": "BRK",
+        "CHA": "CHO",
+        "CHO": "CHO",
+        "CHI": "CHI",
+        "CLE": "CLE",
+        "DAL": "DAL",
+        "DEN": "DEN",
+        "DET": "DET",
+        "GSW": "GSW",
+        "HOU": "HOU",
+        "IND": "IND",
+        "LAC": "LAC",
+        "LAL": "LAL",
+        "MEM": "MEM",
+        "MIA": "MIA",
+        "MIL": "MIL",
+        "MIN": "MIN",
+        "NOP": "NOP",
+        "NOH": "NOP",
+        "NYK": "NYK",
+        "OKC": "OKC",
+        "ORL": "ORL",
+        "PHI": "PHI",
+        "PHX": "PHO",
+        "PHO": "PHO",
+        "POR": "POR",
+        "SAC": "SAC",
+        "SAS": "SAS",
+        "TOR": "TOR",
+        "UTA": "UTA",
+        "WAS": "WAS",
+    }
 
     def __init__(self) -> None:
         self.data_dir = "data"
@@ -75,25 +126,15 @@ class NBAScraper:
     def get_todays_games(self) -> List[Dict]:
         """Return today's NBA games using the official live scoreboard feed."""
 
-        try:
-            data = self._fetch_json(self.SCOREBOARD_URL)
-        except requests.RequestException as exc:
-            logger.error("Unable to download today's scoreboard: %s", exc)
-            return []
+        games = self._get_todays_games_from_official_feed()
+        if games:
+            return games
 
-        games: List[Dict] = []
-        for game in data.get("scoreboard", {}).get("games", []):
-            games.append(
-                {
-                    "game_id": game.get("gameId"),
-                    "date": game.get("gameTimeUTC"),
-                    "home_team": game.get("homeTeam", {}).get("teamTricode"),
-                    "away_team": game.get("awayTeam", {}).get("teamTricode"),
-                    "time": game.get("gameStatusText"),
-                }
-            )
+        games = self._get_todays_games_from_nba_api()
+        if games:
+            return games
 
-        return games
+        return self._get_todays_games_from_bref()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -184,13 +225,25 @@ class NBAScraper:
             return False
 
         pbp_url = self.PBP_URL.format(game_id=game_id)
+        first_event: Optional[Dict] = None
+
         try:
             pbp_payload = self._fetch_json(pbp_url)
         except requests.RequestException as exc:
-            logger.warning("Skipping game %s due to play-by-play download error: %s", game_id, exc)
-            return False
+            logger.warning(
+                "Primary play-by-play endpoint failed for %s: %s", game_id, exc
+            )
+            pbp_payload = None
 
-        first_event = self._extract_first_scoring_event(pbp_payload)
+        if pbp_payload:
+            first_event = self._extract_first_scoring_event(pbp_payload)
+
+        if not first_event:
+            first_event = self._fetch_first_event_from_nba_api(game_id)
+
+        if not first_event:
+            first_event = self._fetch_first_event_from_bref(game)
+
         if not first_event:
             logger.debug("No scoring event found for game %s", game_id)
             return False
@@ -433,3 +486,244 @@ class NBAScraper:
         if elapsed < self.min_request_interval:
             time.sleep(self.min_request_interval - elapsed)
         self._last_request_timestamp = time.time()
+
+    # ------------------------------------------------------------------
+    # Alternative data sources
+    # ------------------------------------------------------------------
+    def _get_todays_games_from_official_feed(self) -> List[Dict]:
+        try:
+            data = self._fetch_json(self.SCOREBOARD_URL)
+        except requests.RequestException as exc:
+            logger.error("Unable to download today's scoreboard: %s", exc)
+            return []
+
+        games: List[Dict] = []
+        for game in data.get("scoreboard", {}).get("games", []):
+            games.append(
+                {
+                    "game_id": game.get("gameId"),
+                    "date": game.get("gameTimeUTC"),
+                    "home_team": game.get("homeTeam", {}).get("teamTricode"),
+                    "away_team": game.get("awayTeam", {}).get("teamTricode"),
+                    "time": game.get("gameStatusText"),
+                }
+            )
+        return games
+
+    def _get_todays_games_from_nba_api(self) -> List[Dict]:
+        if live_scoreboard is None:
+            return []
+
+        try:
+            board = live_scoreboard.ScoreBoard()
+            payload = board.get_dict()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("NBA API scoreboard fallback failed: %s", exc)
+            return []
+
+        games: List[Dict] = []
+        for game in payload.get("scoreboard", {}).get("games", []):
+            games.append(
+                {
+                    "game_id": game.get("gameId"),
+                    "date": game.get("gameTimeUTC"),
+                    "home_team": game.get("homeTeam", {}).get("teamTricode"),
+                    "away_team": game.get("awayTeam", {}).get("teamTricode"),
+                    "time": game.get("gameStatusText"),
+                }
+            )
+        return games
+
+    def _get_todays_games_from_bref(self) -> List[Dict]:
+        if BeautifulSoup is None:
+            logger.debug("BeautifulSoup not available; skipping Basketball Reference fallback")
+            return []
+
+        today = datetime.now()
+        params = {"month": today.month, "day": today.day, "year": today.year}
+        try:
+            response = self.session.get(
+                self.BREF_BOX_SCORES_URL, params=params, timeout=20
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("Basketball Reference scoreboard unavailable: %s", exc)
+            return []
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        games: List[Dict] = []
+        for summary in soup.select("#content .game_summary"):
+            team_links = summary.select("table.teams tbody tr td[data-stat='team'] a")
+            if len(team_links) < 2:
+                continue
+
+            away_code = self._extract_bref_team_code(team_links[0].get("href"))
+            home_code = self._extract_bref_team_code(team_links[1].get("href"))
+            if not away_code or not home_code:
+                continue
+
+            info_element = summary.select_one(".game_info")
+            info_text = " ".join(info_element.stripped_strings) if info_element else ""
+            game_date = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+            games.append(
+                {
+                    "game_id": f"{today.strftime('%Y%m%d')}{home_code}",
+                    "date": game_date.isoformat(),
+                    "home_team": home_code,
+                    "away_team": away_code,
+                    "time": info_text or "TBD",
+                }
+            )
+
+        return games
+
+    def _fetch_first_event_from_nba_api(self, game_id: str) -> Optional[Dict]:
+        if live_playbyplay is None:
+            return None
+
+        try:
+            pbp = live_playbyplay.PlayByPlay(game_id=game_id)
+            payload = pbp.get_dict()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("NBA API play-by-play fallback failed for %s: %s", game_id, exc)
+            return None
+
+        return self._extract_first_scoring_event(payload)
+
+    def _fetch_first_event_from_bref(self, game: Dict) -> Optional[Dict]:
+        if BeautifulSoup is None:
+            return None
+
+        url = self._build_bref_game_url(game)
+        if not url:
+            return None
+
+        try:
+            response = self.session.get(url, timeout=20)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            logger.debug("Basketball Reference PBP unavailable for %s: %s", url, exc)
+            return None
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        table = soup.find("table", id="pbp")
+        if not table:
+            return None
+
+        body = table.find("tbody")
+        if not body:
+            return None
+
+        for row in body.find_all("tr"):
+            score_cell = row.find("td", {"data-stat": "score"})
+            if not score_cell:
+                continue
+
+            score_text = score_cell.get_text(strip=True)
+            if not score_text or score_text == "0-0":
+                continue
+
+            team = self._extract_bref_team_from_row(row)
+            description = self._extract_bref_description(row)
+            clock, period = self._extract_bref_time_period(row)
+            player = self._guess_player_from_description(description)
+
+            if not team or not description:
+                continue
+
+            return {
+                "team": team,
+                "player": player or description,
+                "player_id": None,
+                "description": description,
+                "clock": clock or "12:00",
+                "period": period or 1,
+                "periodType": "REGULAR",
+            }
+
+        return None
+
+    def _build_bref_game_url(self, game: Dict) -> Optional[str]:
+        start_date = game.get("startDateEastern")
+        home_team = game.get("hTeam", {}).get("triCode")
+        if not start_date or not home_team:
+            return None
+
+        try:
+            game_date = datetime.strptime(start_date, "%Y%m%d")
+        except ValueError:
+            return None
+
+        bref_code = self.TEAM_TO_BREF.get(home_team)
+        if not bref_code:
+            return None
+
+        game_id = f"{game_date.strftime('%Y%m%d')}{bref_code}"
+        return self.BREF_PBP_URL.format(game_id=game_id)
+
+    def _extract_bref_team_code(self, href: Optional[str]) -> Optional[str]:
+        if not href:
+            return None
+
+        parts = href.strip("/").split("/")
+        if len(parts) < 2:
+            return None
+
+        code = parts[1].upper()
+        reverse_map = {v: k for k, v in self.TEAM_TO_BREF.items()}
+        return reverse_map.get(code, code)
+
+    def _extract_bref_team_from_row(self, row) -> Optional[str]:
+        team = None
+        for key in ("team_id", "team", "team_abbreviation"):
+            cell = row.find("td", {"data-stat": key})
+            if cell and cell.get_text(strip=True):
+                team = cell.get_text(strip=True)
+                break
+        if team and len(team) == 3:
+            return team.upper()
+        return None
+
+    def _extract_bref_description(self, row) -> str:
+        cell = row.find("td", {"data-stat": "description"})
+        if not cell:
+            return ""
+        return cell.get_text(" ", strip=True)
+
+    def _extract_bref_time_period(self, row) -> Tuple[Optional[str], Optional[int]]:
+        clock = None
+        period = None
+
+        for key in ("time", "time_remaining", "time_elapsed"):
+            cell = row.find("td", {"data-stat": key})
+            if cell and cell.get_text(strip=True):
+                clock = cell.get_text(strip=True)
+                break
+
+        header_cell = row.find("th")
+        if header_cell:
+            period_text = header_cell.get_text(strip=True)
+            period = self._parse_bref_period(period_text)
+
+        return clock, period
+
+    def _parse_bref_period(self, period_text: str) -> Optional[int]:
+        if not period_text:
+            return None
+
+        period_text = period_text.lower()
+        if "ot" in period_text:
+            return 5
+        for number, label in ((1, "1"), (2, "2"), (3, "3"), (4, "4")):
+            if label in period_text:
+                return number
+        return None
+
+    def _guess_player_from_description(self, description: str) -> Optional[str]:
+        if not description:
+            return None
+
+        for marker in [" makes", " misses", " turnover", " assists", " enters"]:
+            if marker in description:
+                return description.split(marker, 1)[0].strip()
+        return description
