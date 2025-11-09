@@ -3,72 +3,21 @@ import logging
 import os
 import sqlite3
 import time
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from datetime import date, datetime, timezone
+from typing import Dict, List, Optional
 
 import requests
-
-try:
-    from bs4 import BeautifulSoup  # type: ignore
-except ImportError:  # pragma: no cover - optional dependency
-    BeautifulSoup = None  # type: ignore
-
-try:
-    from nba_api.live.nba.endpoints import playbyplay as live_playbyplay  # type: ignore
-    from nba_api.live.nba.endpoints import scoreboard as live_scoreboard  # type: ignore
-except ImportError:  # pragma: no cover - optional dependency
-    live_playbyplay = None  # type: ignore
-    live_scoreboard = None  # type: ignore
+from nba_api.live.nba.endpoints import playbyplay as live_playbyplay  # type: ignore
+from nba_api.live.nba.endpoints import scoreboard as live_scoreboard  # type: ignore
+from nba_api.stats.endpoints import leaguegamelog, playbyplayv2  # type: ignore
 
 logger = logging.getLogger(__name__)
 
 
 class NBAScraper:
-    """Scrape NBA play-by-play data while respecting site policies."""
+    """Collect NBA play-by-play data using official and community APIs."""
 
-    SCHEDULE_URL = "https://data.nba.com/data/10s/prod/v1/{season}/schedule.json"
-    PBP_URL = "https://cdn.nba.com/static/json/liveData/playbyplay/playbyplay_{game_id}.json"
-    SCOREBOARD_URL = "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json"
-    ROBOTS_URL = "https://www.nba.com/robots.txt"
-    BREF_BOX_SCORES_URL = "https://www.basketball-reference.com/boxscores/"
-    BREF_PBP_URL = "https://www.basketball-reference.com/boxscores/pbp/{game_id}.html"
-
-    TEAM_TO_BREF = {
-        "ATL": "ATL",
-        "BOS": "BOS",
-        "BKN": "BRK",
-        "BRK": "BRK",
-        "CHA": "CHO",
-        "CHO": "CHO",
-        "CHI": "CHI",
-        "CLE": "CLE",
-        "DAL": "DAL",
-        "DEN": "DEN",
-        "DET": "DET",
-        "GSW": "GSW",
-        "HOU": "HOU",
-        "IND": "IND",
-        "LAC": "LAC",
-        "LAL": "LAL",
-        "MEM": "MEM",
-        "MIA": "MIA",
-        "MIL": "MIL",
-        "MIN": "MIN",
-        "NOP": "NOP",
-        "NOH": "NOP",
-        "NYK": "NYK",
-        "OKC": "OKC",
-        "ORL": "ORL",
-        "PHI": "PHI",
-        "PHX": "PHO",
-        "PHO": "PHO",
-        "POR": "POR",
-        "SAC": "SAC",
-        "SAS": "SAS",
-        "TOR": "TOR",
-        "UTA": "UTA",
-        "WAS": "WAS",
-    }
+    BALLDONTLIE_GAMES_ENDPOINT = "https://www.balldontlie.io/api/v1/games"
 
     def __init__(self) -> None:
         self.data_dir = "data"
@@ -83,9 +32,8 @@ class NBAScraper:
                 )
             }
         )
-        self.min_request_interval = 1.0
+        self.min_request_interval = 0.75
         self._last_request_timestamp: float = 0.0
-        self._robots_checked = False
 
         if not os.path.exists(self.data_dir):
             os.makedirs(self.data_dir, exist_ok=True)
@@ -98,19 +46,24 @@ class NBAScraper:
     def scrape_season_data(self) -> None:
         """Scrape play-by-play data for the current and previous NBA seasons."""
 
-        self._check_robots_once()
-
         current_season_start = self._get_current_season_start_year()
         seasons = [current_season_start - 1, current_season_start]
 
         for season_start in seasons:
             season_label = self._format_season_label(season_start)
-            logger.info("Scraping season %s", season_label)
+            logger.info("Collecting schedule for season %s", season_label)
+
             try:
-                schedule_games = self._fetch_schedule(season_start)
-            except requests.RequestException as exc:
-                logger.error("Failed to download schedule for %s: %s", season_label, exc)
-                continue
+                schedule_games = self._fetch_schedule_from_nba_api(season_label)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.error("NBA API schedule retrieval failed for %s: %s", season_label, exc)
+                schedule_games = []
+
+            if not schedule_games:
+                logger.warning(
+                    "Falling back to balldontlie schedule for season %s", season_label
+                )
+                schedule_games = self._fetch_schedule_from_balldontlie(season_start)
 
             processed_games = 0
             for game in schedule_games:
@@ -124,17 +77,13 @@ class NBAScraper:
             self._export_season_files(season_label)
 
     def get_todays_games(self) -> List[Dict]:
-        """Return today's NBA games using the official live scoreboard feed."""
-
-        games = self._get_todays_games_from_official_feed()
-        if games:
-            return games
+        """Return today's NBA games using NBA and balldontlie APIs."""
 
         games = self._get_todays_games_from_nba_api()
         if games:
             return games
 
-        return self._get_todays_games_from_bref()
+        return self._get_todays_games_from_balldontlie()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -161,24 +110,6 @@ class NBAScraper:
                 """
             )
 
-    def _check_robots_once(self) -> None:
-        if self._robots_checked:
-            return
-
-        try:
-            response = self.session.get(self.ROBOTS_URL, timeout=15)
-            response.raise_for_status()
-            content = response.text
-            disallowed_sections = [line.split(":", 1)[1].strip() for line in content.splitlines() if line.lower().startswith("disallow:")]
-            for path in ("/static/json", "/data/10s"):
-                if any(section.startswith(path) for section in disallowed_sections):
-                    raise RuntimeError(
-                        f"Scraping blocked by robots.txt rules for path '{path}'."
-                    )
-        except requests.RequestException as exc:
-            logger.warning("Could not verify robots.txt. Proceeding cautiously: %s", exc)
-        self._robots_checked = True
-
     def _get_current_season_start_year(self) -> int:
         today = datetime.now()
         if today.month >= 10:
@@ -188,67 +119,134 @@ class NBAScraper:
     def _format_season_label(self, season_start: int) -> str:
         return f"{season_start}-{(season_start + 1) % 100:02d}"
 
-    def _fetch_schedule(self, season_start: int) -> List[Dict]:
-        url = self.SCHEDULE_URL.format(season=season_start)
-        payload = self._fetch_json(url)
-        games = payload.get("league", {}).get("standard", [])
-        if not isinstance(games, list):
-            return []
-        return games
+    def _respect_rate_limit(self) -> None:
+        elapsed = time.time() - self._last_request_timestamp
+        if elapsed < self.min_request_interval:
+            time.sleep(self.min_request_interval - elapsed)
+        self._last_request_timestamp = time.time()
+
+    def _fetch_schedule_from_nba_api(self, season_label: str) -> List[Dict]:
+        """Fetch a season schedule via the official nba_api client."""
+
+        self._respect_rate_limit()
+        log = leaguegamelog.LeagueGameLog(
+            season=season_label,
+            season_type_all_star="Regular Season",
+        )
+        frame = log.get_data_frames()[0]
+
+        games: Dict[str, Dict] = {}
+        for _, row in frame.iterrows():
+            game_id = str(row.get("GAME_ID"))
+            matchup = row.get("MATCHUP", "")
+            team = row.get("TEAM_ABBREVIATION")
+            game_date = row.get("GAME_DATE")
+
+            if not game_id or not matchup or not team or not game_date:
+                continue
+
+            try:
+                parsed_date = datetime.strptime(game_date, "%b %d, %Y").date()
+            except ValueError:
+                continue
+
+            game_entry = games.setdefault(
+                game_id,
+                {
+                    "game_id": game_id,
+                    "game_date": parsed_date,
+                    "home_team": None,
+                    "away_team": None,
+                },
+            )
+
+            if "vs." in matchup:
+                game_entry["home_team"] = team
+                game_entry["away_team"] = matchup.split(" vs. ", 1)[1]
+            elif "@" in matchup:
+                game_entry["home_team"] = matchup.split(" @ ", 1)[1]
+                game_entry["away_team"] = team
+
+        filtered_games = [game for game in games.values() if game["home_team"] and game["away_team"]]
+        return sorted(filtered_games, key=lambda g: (g["game_date"], g["game_id"]))
+
+    def _fetch_schedule_from_balldontlie(self, season_start: int) -> List[Dict]:
+        """Fallback schedule retrieval using the balldontlie community API."""
+
+        games: List[Dict] = []
+        page = 1
+        while True:
+            params = {
+                "seasons[]": season_start,
+                "per_page": 100,
+                "page": page,
+                "postseason": "false",
+            }
+            try:
+                self._respect_rate_limit()
+                response = self.session.get(
+                    self.BALLDONTLIE_GAMES_ENDPOINT,
+                    params=params,
+                    timeout=20,
+                )
+                response.raise_for_status()
+            except requests.RequestException as exc:
+                logger.error("balldontlie schedule request failed: %s", exc)
+                break
+
+            payload = response.json()
+            data = payload.get("data", [])
+            for item in data:
+                try:
+                    parsed_date = datetime.fromisoformat(item["date"].replace("Z", "+00:00")).date()
+                except (KeyError, ValueError, TypeError):
+                    continue
+
+                games.append(
+                    {
+                        "game_id": str(item.get("id")),
+                        "game_date": parsed_date,
+                        "home_team": item.get("home_team", {}).get("abbreviation"),
+                        "away_team": item.get("visitor_team", {}).get("abbreviation"),
+                    }
+                )
+
+            meta = payload.get("meta", {})
+            if page >= int(meta.get("total_pages", page)):
+                break
+            page += 1
+
+        filtered_games = [game for game in games if game["home_team"] and game["away_team"]]
+        return sorted(filtered_games, key=lambda g: (g["game_date"], g["game_id"]))
 
     def _should_process_game(self, game: Dict) -> bool:
-        try:
-            status_num = int(game.get("statusNum", 0))
-        except (TypeError, ValueError):
-            status_num = 0
-
-        if status_num < 2:  # 1 = Scheduled, 2 = Live, 3 = Final
+        game_date = game.get("game_date")
+        if not isinstance(game_date, date):
             return False
 
-        start_date = game.get("startDateEastern")
-        if not start_date:
+        if game_date > datetime.now().date():
             return False
 
-        try:
-            game_date = datetime.strptime(start_date, "%Y%m%d").date()
-        except ValueError:
-            return False
-
-        return game_date <= datetime.now().date()
-
-    def _process_game(self, game: Dict, season_label: str) -> bool:
-        game_id = game.get("gameId")
+        game_id = game.get("game_id")
         if not game_id:
             return False
 
-        if self._game_already_processed(game_id):
+        return not self._game_already_processed(game_id)
+
+    def _process_game(self, game: Dict, season_label: str) -> bool:
+        game_id = game.get("game_id")
+        if not game_id:
             return False
 
-        pbp_url = self.PBP_URL.format(game_id=game_id)
-        first_event: Optional[Dict] = None
-
-        try:
-            pbp_payload = self._fetch_json(pbp_url)
-        except requests.RequestException as exc:
-            logger.warning(
-                "Primary play-by-play endpoint failed for %s: %s", game_id, exc
-            )
-            pbp_payload = None
-
-        if pbp_payload:
-            first_event = self._extract_first_scoring_event(pbp_payload)
-
+        first_event = self._fetch_first_event_from_nba_api(game_id)
         if not first_event:
-            first_event = self._fetch_first_event_from_nba_api(game_id)
-
-        if not first_event:
-            first_event = self._fetch_first_event_from_bref(game)
+            first_event = self._fetch_first_event_from_live_feed(game_id)
 
         if not first_event:
             logger.debug("No scoring event found for game %s", game_id)
             return False
 
-        record = self._build_game_record(game, season_label, first_event, pbp_url)
+        record = self._build_game_record(game, season_label, first_event)
         self._upsert_game_record(record)
         return True
 
@@ -260,11 +258,60 @@ class NBAScraper:
             ).fetchone()
             return row is not None
 
-    def _extract_first_scoring_event(self, payload: Dict) -> Optional[Dict]:
-        game = payload.get("game")
-        if not isinstance(game, dict):
+    def _fetch_first_event_from_nba_api(self, game_id: str) -> Optional[Dict]:
+        """Fetch the first scoring event using nba_api.stats play-by-play."""
+
+        try:
+            self._respect_rate_limit()
+            pbp = playbyplayv2.PlayByPlayV2(game_id=game_id, start_period=1, end_period=1)
+            frame = pbp.get_data_frames()[0]
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("nba_api play-by-play request failed for %s: %s", game_id, exc)
             return None
 
+        for _, row in frame.iterrows():
+            score = row.get("SCORE")
+            if not score or score.strip() in {"", "0 - 0"}:
+                continue
+
+            team = row.get("PLAYER1_TEAM_ABBREVIATION")
+            player = row.get("PLAYER1_NAME")
+            description = (
+                row.get("HOMEDESCRIPTION")
+                or row.get("VISITORDESCRIPTION")
+                or row.get("NEUTRALDESCRIPTION")
+            )
+
+            if not team or not player or not description:
+                continue
+
+            return {
+                "team": team,
+                "player": player,
+                "player_id": str(row.get("PLAYER1_ID")) if row.get("PLAYER1_ID") else None,
+                "description": description,
+                "clock": row.get("PCTIMESTRING", "12:00"),
+                "period": int(row.get("PERIOD", 1)),
+                "periodType": "REGULAR",
+            }
+
+        return None
+
+    def _fetch_first_event_from_live_feed(self, game_id: str) -> Optional[Dict]:
+        """Fallback to the nba_api live feed if stats API is unavailable."""
+
+        if live_playbyplay is None:  # type: ignore[truthy-bool]
+            return None
+
+        try:
+            self._respect_rate_limit()
+            pbp = live_playbyplay.PlayByPlay(game_id=game_id)
+            payload = pbp.get_dict()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Live play-by-play fallback failed for %s: %s", game_id, exc)
+            return None
+
+        game = payload.get("game", {})
         actions = game.get("actions", [])
         if not isinstance(actions, list):
             return None
@@ -280,14 +327,16 @@ class NBAScraper:
 
             team = action.get("teamTricode")
             player = action.get("playerName") or action.get("playerNameI")
-            if not team or not player:
+            description = action.get("description") or action.get("actionType")
+
+            if not team or not player or not description:
                 continue
 
             return {
                 "team": team,
                 "player": player,
                 "player_id": str(action.get("personId")) if action.get("personId") else None,
-                "description": action.get("description") or action.get("actionType"),
+                "description": description,
                 "clock": action.get("clock", "12:00"),
                 "period": int(action.get("period", 1)),
                 "periodType": action.get("periodType", "REGULAR"),
@@ -300,13 +349,14 @@ class NBAScraper:
         game: Dict,
         season_label: str,
         first_event: Dict,
-        source_url: str,
     ) -> Dict:
-        start_date = game.get("startDateEastern", "")
-        try:
-            game_date = datetime.strptime(start_date, "%Y%m%d").date().isoformat()
-        except ValueError:
-            game_date = datetime.now().date().isoformat()
+        game_date = game.get("game_date")
+        if isinstance(game_date, datetime):
+            game_date_str = game_date.date().isoformat()
+        elif hasattr(game_date, "isoformat"):
+            game_date_str = game_date.isoformat()  # type: ignore[assignment]
+        else:
+            game_date_str = datetime.now().date().isoformat()
 
         elapsed = self._calculate_elapsed_seconds(
             first_event.get("clock", "12:00"),
@@ -315,17 +365,17 @@ class NBAScraper:
         )
 
         return {
-            "game_id": game.get("gameId"),
+            "game_id": game.get("game_id"),
             "season": season_label,
-            "game_date": game_date,
-            "home_team": game.get("hTeam", {}).get("triCode"),
-            "away_team": game.get("vTeam", {}).get("triCode"),
+            "game_date": game_date_str,
+            "home_team": game.get("home_team"),
+            "away_team": game.get("away_team"),
             "first_scoring_team": first_event.get("team"),
             "first_scoring_player": first_event.get("player"),
             "first_scoring_player_id": first_event.get("player_id"),
             "first_scoring_description": first_event.get("description"),
             "first_scoring_elapsed": elapsed,
-            "source_url": source_url,
+            "source_url": "nba_api.stats.playbyplayv2",
             "last_updated": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -468,57 +518,26 @@ class NBAScraper:
             seconds = 0.0
 
         period_length = 12 * 60
-        if period > 4 or period_type.upper() == "OVERTIME":
+        if period > 4 or str(period_type).upper() == "OVERTIME":
             period_length = 5 * 60
 
         elapsed_in_period = period_length - (minutes * 60 + seconds)
         total_elapsed = elapsed_in_period + max(0, period - 1) * 12 * 60
         return round(total_elapsed, 2)
 
-    def _fetch_json(self, url: str) -> Dict:
-        self._respect_rate_limit()
-        response = self.session.get(url, timeout=20)
-        response.raise_for_status()
-        return response.json()
-
-    def _respect_rate_limit(self) -> None:
-        elapsed = time.time() - self._last_request_timestamp
-        if elapsed < self.min_request_interval:
-            time.sleep(self.min_request_interval - elapsed)
-        self._last_request_timestamp = time.time()
-
     # ------------------------------------------------------------------
-    # Alternative data sources
+    # Today's games helpers
     # ------------------------------------------------------------------
-    def _get_todays_games_from_official_feed(self) -> List[Dict]:
-        try:
-            data = self._fetch_json(self.SCOREBOARD_URL)
-        except requests.RequestException as exc:
-            logger.error("Unable to download today's scoreboard: %s", exc)
-            return []
-
-        games: List[Dict] = []
-        for game in data.get("scoreboard", {}).get("games", []):
-            games.append(
-                {
-                    "game_id": game.get("gameId"),
-                    "date": game.get("gameTimeUTC"),
-                    "home_team": game.get("homeTeam", {}).get("teamTricode"),
-                    "away_team": game.get("awayTeam", {}).get("teamTricode"),
-                    "time": game.get("gameStatusText"),
-                }
-            )
-        return games
-
     def _get_todays_games_from_nba_api(self) -> List[Dict]:
-        if live_scoreboard is None:
+        if live_scoreboard is None:  # type: ignore[truthy-bool]
             return []
 
         try:
+            self._respect_rate_limit()
             board = live_scoreboard.ScoreBoard()
             payload = board.get_dict()
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("NBA API scoreboard fallback failed: %s", exc)
+            logger.warning("nba_api live scoreboard request failed: %s", exc)
             return []
 
         games: List[Dict] = []
@@ -534,196 +553,34 @@ class NBAScraper:
             )
         return games
 
-    def _get_todays_games_from_bref(self) -> List[Dict]:
-        if BeautifulSoup is None:
-            logger.debug("BeautifulSoup not available; skipping Basketball Reference fallback")
-            return []
-
-        today = datetime.now()
-        params = {"month": today.month, "day": today.day, "year": today.year}
+    def _get_todays_games_from_balldontlie(self) -> List[Dict]:
+        today = datetime.now().date().isoformat()
+        params = {
+            "dates[]": today,
+            "per_page": 100,
+        }
         try:
+            self._respect_rate_limit()
             response = self.session.get(
-                self.BREF_BOX_SCORES_URL, params=params, timeout=20
+                self.BALLDONTLIE_GAMES_ENDPOINT,
+                params=params,
+                timeout=15,
             )
             response.raise_for_status()
         except requests.RequestException as exc:
-            logger.warning("Basketball Reference scoreboard unavailable: %s", exc)
+            logger.error("balldontlie today's games request failed: %s", exc)
             return []
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        payload = response.json()
         games: List[Dict] = []
-        for summary in soup.select("#content .game_summary"):
-            team_links = summary.select("table.teams tbody tr td[data-stat='team'] a")
-            if len(team_links) < 2:
-                continue
-
-            away_code = self._extract_bref_team_code(team_links[0].get("href"))
-            home_code = self._extract_bref_team_code(team_links[1].get("href"))
-            if not away_code or not home_code:
-                continue
-
-            info_element = summary.select_one(".game_info")
-            info_text = " ".join(info_element.stripped_strings) if info_element else ""
-            game_date = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+        for game in payload.get("data", []):
             games.append(
                 {
-                    "game_id": f"{today.strftime('%Y%m%d')}{home_code}",
-                    "date": game_date.isoformat(),
-                    "home_team": home_code,
-                    "away_team": away_code,
-                    "time": info_text or "TBD",
+                    "game_id": str(game.get("id")),
+                    "date": game.get("date"),
+                    "home_team": game.get("home_team", {}).get("abbreviation"),
+                    "away_team": game.get("visitor_team", {}).get("abbreviation"),
+                    "time": game.get("status"),
                 }
             )
-
         return games
-
-    def _fetch_first_event_from_nba_api(self, game_id: str) -> Optional[Dict]:
-        if live_playbyplay is None:
-            return None
-
-        try:
-            pbp = live_playbyplay.PlayByPlay(game_id=game_id)
-            payload = pbp.get_dict()
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("NBA API play-by-play fallback failed for %s: %s", game_id, exc)
-            return None
-
-        return self._extract_first_scoring_event(payload)
-
-    def _fetch_first_event_from_bref(self, game: Dict) -> Optional[Dict]:
-        if BeautifulSoup is None:
-            return None
-
-        url = self._build_bref_game_url(game)
-        if not url:
-            return None
-
-        try:
-            response = self.session.get(url, timeout=20)
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            logger.debug("Basketball Reference PBP unavailable for %s: %s", url, exc)
-            return None
-
-        soup = BeautifulSoup(response.text, "html.parser")
-        table = soup.find("table", id="pbp")
-        if not table:
-            return None
-
-        body = table.find("tbody")
-        if not body:
-            return None
-
-        for row in body.find_all("tr"):
-            score_cell = row.find("td", {"data-stat": "score"})
-            if not score_cell:
-                continue
-
-            score_text = score_cell.get_text(strip=True)
-            if not score_text or score_text == "0-0":
-                continue
-
-            team = self._extract_bref_team_from_row(row)
-            description = self._extract_bref_description(row)
-            clock, period = self._extract_bref_time_period(row)
-            player = self._guess_player_from_description(description)
-
-            if not team or not description:
-                continue
-
-            return {
-                "team": team,
-                "player": player or description,
-                "player_id": None,
-                "description": description,
-                "clock": clock or "12:00",
-                "period": period or 1,
-                "periodType": "REGULAR",
-            }
-
-        return None
-
-    def _build_bref_game_url(self, game: Dict) -> Optional[str]:
-        start_date = game.get("startDateEastern")
-        home_team = game.get("hTeam", {}).get("triCode")
-        if not start_date or not home_team:
-            return None
-
-        try:
-            game_date = datetime.strptime(start_date, "%Y%m%d")
-        except ValueError:
-            return None
-
-        bref_code = self.TEAM_TO_BREF.get(home_team)
-        if not bref_code:
-            return None
-
-        game_id = f"{game_date.strftime('%Y%m%d')}{bref_code}"
-        return self.BREF_PBP_URL.format(game_id=game_id)
-
-    def _extract_bref_team_code(self, href: Optional[str]) -> Optional[str]:
-        if not href:
-            return None
-
-        parts = href.strip("/").split("/")
-        if len(parts) < 2:
-            return None
-
-        code = parts[1].upper()
-        reverse_map = {v: k for k, v in self.TEAM_TO_BREF.items()}
-        return reverse_map.get(code, code)
-
-    def _extract_bref_team_from_row(self, row) -> Optional[str]:
-        team = None
-        for key in ("team_id", "team", "team_abbreviation"):
-            cell = row.find("td", {"data-stat": key})
-            if cell and cell.get_text(strip=True):
-                team = cell.get_text(strip=True)
-                break
-        if team and len(team) == 3:
-            return team.upper()
-        return None
-
-    def _extract_bref_description(self, row) -> str:
-        cell = row.find("td", {"data-stat": "description"})
-        if not cell:
-            return ""
-        return cell.get_text(" ", strip=True)
-
-    def _extract_bref_time_period(self, row) -> Tuple[Optional[str], Optional[int]]:
-        clock = None
-        period = None
-
-        for key in ("time", "time_remaining", "time_elapsed"):
-            cell = row.find("td", {"data-stat": key})
-            if cell and cell.get_text(strip=True):
-                clock = cell.get_text(strip=True)
-                break
-
-        header_cell = row.find("th")
-        if header_cell:
-            period_text = header_cell.get_text(strip=True)
-            period = self._parse_bref_period(period_text)
-
-        return clock, period
-
-    def _parse_bref_period(self, period_text: str) -> Optional[int]:
-        if not period_text:
-            return None
-
-        period_text = period_text.lower()
-        if "ot" in period_text:
-            return 5
-        for number, label in ((1, "1"), (2, "2"), (3, "3"), (4, "4")):
-            if label in period_text:
-                return number
-        return None
-
-    def _guess_player_from_description(self, description: str) -> Optional[str]:
-        if not description:
-            return None
-
-        for marker in [" makes", " misses", " turnover", " assists", " enters"]:
-            if marker in description:
-                return description.split(marker, 1)[0].strip()
-        return description
